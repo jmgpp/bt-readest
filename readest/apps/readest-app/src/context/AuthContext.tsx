@@ -10,6 +10,7 @@ interface AuthContextType {
   user: User | null;
   login: (token: string, user: User) => void;
   logout: () => void;
+  isLoading: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -28,6 +29,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
     return null;
   });
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     const syncSession = (
@@ -50,16 +52,35 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         setToken(null);
         setUser(null);
       }
+      setIsLoading(false);
     };
+
     const refreshSession = async () => {
       try {
-        await supabase.auth.refreshSession();
-      } catch {
+        console.log('Refreshing session on initial load');
+        const { data, error } = await supabase.auth.getSession();
+        
+        if (error) {
+          console.error('Error refreshing session:', error);
+          syncSession(null);
+          return;
+        }
+        
+        if (data?.session) {
+          console.log('Session found on initial load');
+          syncSession(data.session);
+        } else {
+          console.log('No session found on initial load');
+          syncSession(null);
+        }
+      } catch (error) {
+        console.error('Unexpected error refreshing session:', error);
         syncSession(null);
       }
     };
 
-    const { data: subscription } = supabase.auth.onAuthStateChange((_, session) => {
+    const { data: subscription } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log('Auth state changed:', event);
       syncSession(session);
     });
 
@@ -75,24 +96,31 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setUser(newUser);
     localStorage.setItem('token', newToken);
     localStorage.setItem('user', JSON.stringify(newUser));
+    setIsLoading(false);
   };
 
   const logout = async () => {
     console.log('Logging out');
+    setIsLoading(true);
     try {
       await supabase.auth.refreshSession();
-    } catch {
+    } catch (error) {
+      console.error('Error refreshing session during logout:', error);
     } finally {
       await supabase.auth.signOut();
       localStorage.removeItem('token');
+      localStorage.removeItem('refresh_token');
       localStorage.removeItem('user');
       setToken(null);
       setUser(null);
+      setIsLoading(false);
     }
   };
 
   return (
-    <AuthContext.Provider value={{ token, user, login, logout }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ token, user, login, logout, isLoading }}>
+      {children}
+    </AuthContext.Provider>
   );
 };
 

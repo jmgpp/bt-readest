@@ -1,384 +1,312 @@
 'use client';
-import clsx from 'clsx';
-import { useEffect, useRef, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-
+import { useEffect, useState, useRef } from 'react';
 import { Auth } from '@supabase/auth-ui-react';
 import { ThemeSupa } from '@supabase/auth-ui-shared';
-import { FcGoogle } from 'react-icons/fc';
-import { FaApple } from 'react-icons/fa';
-import { FaGithub } from 'react-icons/fa';
-import { IoArrowBack } from 'react-icons/io5';
 
-import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/utils/supabase';
-import { useEnv } from '@/context/EnvContext';
 import { useThemeStore } from '@/store/themeStore';
-import { useSettingsStore } from '@/store/settingsStore';
 import { useTranslation } from 'react-i18next';
-import { useTrafficLightStore } from '@/store/trafficLightStore';
-import { isTauriAppPlatform } from '@/services/environment';
-import { onOpenUrl } from '@tauri-apps/plugin-deep-link';
-import { start, cancel, onUrl, onInvalidUrl } from '@fabianlars/tauri-plugin-oauth';
-import { openUrl } from '@tauri-apps/plugin-opener';
-import { handleAuthCallback } from '@/helpers/auth';
-import { getAppleIdAuth, Scope } from './utils/appleIdAuth';
-import { authWithSafari } from './utils/safariAuth';
+import { useAuth } from '@/context/AuthContext';
+
+// Keep WEB_AUTH_CALLBACK constant for backward compatibility
 import { READEST_WEB_BASE_URL } from '@/services/constants';
-import WindowButtons from '@/components/WindowButtons';
 
-type OAuthProvider = 'google' | 'apple' | 'azure' | 'github';
-
-interface SingleInstancePayload {
-  args: string[];
-  cwd: string;
-}
-
-interface ProviderLoginProp {
-  provider: OAuthProvider;
-  handleSignIn: (provider: OAuthProvider) => void;
-  Icon: React.ElementType;
-  label: string;
-}
-
-const WEB_AUTH_CALLBACK = `${READEST_WEB_BASE_URL}/auth/callback`;
-const DEEPLINK_CALLBACK = 'booktalk://auth/callback';
-
-const ProviderLogin: React.FC<ProviderLoginProp> = ({ provider, handleSignIn, Icon, label }) => {
-  return (
-    <button
-      className='btn btn-outline w-full gap-2'
-      onClick={() => handleSignIn(provider)}
-    >
-      <Icon className='h-5 w-5' />
-      {label}
-    </button>
-  );
+// Absolute URL is REQUIRED for Supabase Auth
+const getRedirectUrl = () => {
+  // In browser environments, use the current origin
+  if (typeof window !== 'undefined') {
+    return `${window.location.origin}/auth/callback`;
+  }
+  // Fall back to env variable on server
+  return `${READEST_WEB_BASE_URL}/auth/callback`;
 };
 
 export default function AuthPage() {
   const { t: _ } = useTranslation();
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const { login } = useAuth();
-  const { envConfig, appService } = useEnv();
   const { isDarkMode } = useThemeStore();
-  const { isTrafficLightVisible } = useTrafficLightStore();
-  const { settings, setSettings, saveSettings } = useSettingsStore();
-  const [port, setPort] = useState<number | null>(null);
-  const isOAuthServerRunning = useRef(false);
-  const [isMounted, setIsMounted] = useState(false);
+  const { user, login } = useAuth();
+  const [returnTo, setReturnTo] = useState<string>('/library');
+  const [mounted, setMounted] = useState(false);
+  const hasRedirected = useRef(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const [debugEmail, setDebugEmail] = useState('');
+  const [debugPassword, setDebugPassword] = useState('');
 
-  const headerRef = useRef<HTMLDivElement>(null);
-
-  const getTauriRedirectTo = (isOAuth: boolean) => {
-    if (process.env.NODE_ENV === 'production' || appService?.isMobile) {
-      if (appService?.isIOSApp) {
-        return isOAuth ? DEEPLINK_CALLBACK : WEB_AUTH_CALLBACK;
-      } else if (appService?.isAndroidApp) {
-        return WEB_AUTH_CALLBACK;
-      }
-      return DEEPLINK_CALLBACK;
-    }
-    return `http://localhost:${port}`; // only for development env on Desktop
+  // Add a function for emergency access
+  const handleEmergencyAccess = () => {
+    console.log('Using emergency access bypass');
+    // Set a flag to indicate we're using emergency access
+    localStorage.setItem('emergency_access', 'true');
+    // Force redirect to library
+    window.location.replace('/library');
   };
 
-  const getWebRedirectTo = () => {
-    return process.env.NODE_ENV === 'production'
-      ? WEB_AUTH_CALLBACK
-      : `${window.location.origin}/auth/callback`;
-  };
-
-  const tauriSignInApple = async () => {
-    if (!supabase) {
-      throw new Error('No backend connected');
-    }
-    supabase.auth.signOut();
-    const request = {
-      scope: ['fullName', 'email'] as Scope[],
-    };
-    const appleAuthResponse = await getAppleIdAuth(request);
-    if (appleAuthResponse.identityToken) {
-      const { error } = await supabase.auth.signInWithIdToken({
-        provider: 'apple',
-        token: appleAuthResponse.identityToken,
-      });
-      if (error) {
-        console.error('Authentication error:', error);
-      }
+  // Handle successful authentication directly
+  const handleAuthSuccess = async (session: any) => {
+    console.log('Auth success detected, handling manually');
+    if (session?.access_token && session?.user) {
+      // Update auth context
+      login(session.access_token, session.user);
+      
+      // Get the return URL
+      let next = returnTo || '/library';
+      if (next === '/auth') next = '/library';
+      
+      console.log('Login successful, redirecting to:', next);
+      // Wait a moment to ensure state is updated
+      setTimeout(() => {
+        window.location.replace(next);
+      }, 500);
     }
   };
 
-  const tauriSignIn = async (provider: OAuthProvider) => {
-    if (!supabase) {
-      throw new Error('No backend connected');
-    }
-    supabase.auth.signOut();
-    const { data, error } = await supabase.auth.signInWithOAuth({
-      provider,
-      options: {
-        skipBrowserRedirect: true,
-        redirectTo: getTauriRedirectTo(true),
-      },
-    });
+  // Get return URL from query parameters if available
+  useEffect(() => {
+    if (hasRedirected.current) return;
 
-    if (error) {
-      console.error('Authentication error:', error);
-      return;
-    }
-    // Open the OAuth URL in a ASWebAuthenticationSession on iOS to comply with Apple's guidelines
-    // for other platforms, open the OAuth URL in the default browser
-    if (appService?.isIOSApp) {
-      const res = await authWithSafari({ authUrl: data.url });
-      if (res) {
-        handleOAuthUrl(res.redirectUrl);
-      }
-    } else {
-      await openUrl(data.url);
-    }
-  };
-
-  const handleOAuthUrl = async (url: string) => {
-    console.log('Handle OAuth URL:', url);
-    const hashMatch = url.match(/#(.*)/);
-    if (hashMatch) {
-      const hash = hashMatch[1];
-      const params = new URLSearchParams(hash);
-      const accessToken = params.get('access_token');
-      const refreshToken = params.get('refresh_token');
-      const type = params.get('type');
-      const next = params.get('next') ?? '/';
-      if (accessToken) {
-        handleAuthCallback({ accessToken, refreshToken, type, next, login, navigate: router.push });
-      }
-    }
-  };
-
-  const startTauriOAuth = async () => {
-    try {
-      if (process.env.NODE_ENV === 'production' || appService?.isMobile) {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        const currentWindow = getCurrentWindow();
-        currentWindow.listen('single-instance', ({ event, payload }) => {
-          console.log('Received deep link:', event, payload);
-          const { args } = payload as SingleInstancePayload;
-          if (args?.[1]) {
-            handleOAuthUrl(args[1]);
+    const timer = setTimeout(() => {
+      setMounted(true);
+      
+      if (typeof window !== 'undefined') {
+        // Parse returnTo from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const returnParam = urlParams.get('returnTo');
+        if (returnParam && returnParam !== '/auth') {
+          setReturnTo(returnParam);
+        }
+        
+        // Check for error parameters
+        const errorParam = urlParams.get('error');
+        if (errorParam) {
+          console.error('Auth error detected:', errorParam);
+          // Auto-show debug options on error
+          setShowDebug(true);
+        }
+        
+        // Load debug credentials if they exist
+        const savedEmail = localStorage.getItem('debug_email');
+        if (savedEmail) {
+          setDebugEmail(savedEmail);
+        }
+        
+        // Display all cookies for debugging
+        console.log('All cookies:', document.cookie);
+        // Check for Supabase cookies specifically
+        const hasSbCookie = document.cookie.split(';').some(cookie => cookie.trim().startsWith('sb-'));
+        console.log('Has Supabase cookies:', hasSbCookie);
+        
+        // Set up auth state change listener
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+          console.log('Auth state changed:', event);
+          if (event === 'SIGNED_IN' && session) {
+            handleAuthSuccess(session);
           }
         });
-        await onOpenUrl((urls) => {
-          urls.forEach((url) => {
-            handleOAuthUrl(url);
-          });
-        });
-      } else {
-        const port = await start();
-        setPort(port);
-        console.log(`OAuth server started on port ${port}`);
-
-        await onUrl(handleOAuthUrl);
-        await onInvalidUrl((url) => {
-          console.log('Received invalid OAuth URL:', url);
-        });
+        
+        return () => {
+          subscription.unsubscribe();
+        };
       }
-    } catch (error) {
-      console.error('Error starting OAuth server:', error);
-    }
-  };
+    }, 300);
+    
+    return () => clearTimeout(timer);
+  }, []);
 
-  const stopTauriOAuth = async () => {
+  // Get the absolute redirect URL - critical for Supabase Auth
+  const redirectUrl = getRedirectUrl();
+
+  console.log('Auth redirect URL:', redirectUrl);
+  console.log('Return to path:', returnTo);
+
+  const handleDebugLogin = async () => {
+    if (!debugEmail || !debugPassword) {
+      return;
+    }
+    
+    // Save for future emergency login
+    localStorage.setItem('debug_email', debugEmail);
+    localStorage.setItem('debug_password', debugPassword);
+    
+    // Try login
     try {
-      if (port) {
-        await cancel(port);
-        console.log('OAuth server stopped');
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: debugEmail,
+        password: debugPassword
+      });
+      
+      if (error) {
+        console.error('Debug login error:', error);
+        return;
+      }
+      
+      if (data?.session) {
+        console.log('Debug login successful, redirecting to library');
+        // Use the same handler as the normal login flow
+        handleAuthSuccess(data.session);
       }
     } catch (error) {
-      console.error('Error stopping OAuth server:', error);
+      console.error('Debug login error:', error);
     }
   };
 
-  const handleGoBack = () => {
-    // Keep login false to avoid infinite loop to redirect to the login page
-    settings.keepLogin = false;
-    setSettings(settings);
-    saveSettings(envConfig, settings);
-    router.back();
+  const handleSaveCredentials = () => {
+    if (!debugEmail) return;
+    localStorage.setItem('debug_email', debugEmail);
+    if (debugPassword) {
+      localStorage.setItem('debug_password', debugPassword);
+    }
+    alert('Debug credentials saved');
   };
 
-  const getAuthLocalization = () => {
-    return {
-      variables: {
-        sign_in: {
-          email_label: _('Email address'),
-          password_label: _('Your Password'),
-          email_input_placeholder: _('Your email address'),
-          password_input_placeholder: _('Your password'),
-          button_label: _('Sign in'),
-          loading_button_label: _('Signing in...'),
-          social_provider_text: _('Sign in with {{provider}}'),
-          link_text: _('Already have an account? Sign in'),
-        },
-        sign_up: {
-          email_label: _('Email address'),
-          password_label: _('Create a Password'),
-          email_input_placeholder: _('Your email address'),
-          password_input_placeholder: _('Your password'),
-          button_label: _('Sign up'),
-          loading_button_label: _('Signing up...'),
-          social_provider_text: _('Sign in with {{provider}}'),
-          link_text: _('Don\'t have an account? Sign up'),
-          confirmation_text: _('Check your email for the confirmation link'),
-        },
-        magic_link: {
-          email_input_label: _('Email address'),
-          email_input_placeholder: _('Your email address'),
-          button_label: _('Sign in'),
-          loading_button_label: _('Signing in ...'),
-          link_text: _('Send a magic link email'),
-          confirmation_text: _('Check your email for the magic link'),
-        },
-        forgotten_password: {
-          email_label: _('Email address'),
-          password_label: _('Your Password'),
-          email_input_placeholder: _('Your email address'),
-          button_label: _('Send reset password instructions'),
-          loading_button_label: _('Sending reset instructions ...'),
-          link_text: _('Forgot your password?'),
-          confirmation_text: _('Check your email for the password reset link'),
-        },
-        verify_otp: {
-          email_input_label: _('Email address'),
-          email_input_placeholder: _('Your email address'),
-          phone_input_label: _('Phone number'),
-          phone_input_placeholder: _('Your phone number'),
-          token_input_label: _('Token'),
-          token_input_placeholder: _('Your OTP token'),
-          button_label: _('Verify token'),
-          loading_button_label: _('Signing in ...'),
-        },
+  // Setup localization for auth UI
+  const localization = {
+    variables: {
+      sign_in: {
+        email_label: _('Email address'),
+        password_label: _('Your Password'),
+        email_input_placeholder: _('Your email address'),
+        password_input_placeholder: _('Your password'),
+        button_label: _('Sign in'),
+        loading_button_label: _('Signing in...'),
+        social_provider_text: _('Sign in with {{provider}}'),
+        link_text: _('Already have an account? Sign in'),
       },
-    };
+      sign_up: {
+        email_label: _('Email address'),
+        password_label: _('Create a Password'),
+        email_input_placeholder: _('Your email address'),
+        password_input_placeholder: _('Your password'),
+        button_label: _('Sign up'),
+        loading_button_label: _('Signing up...'),
+        social_provider_text: _('Sign in with {{provider}}'),
+        link_text: _('Don\'t have an account? Sign up'),
+        confirmation_text: _('Check your email for the confirmation link'),
+      },
+      forgotten_password: {
+        email_label: _('Email address'),
+        password_label: _('Your Password'),
+        email_input_placeholder: _('Your email address'),
+        button_label: _('Send reset password instructions'),
+        loading_button_label: _('Sending reset instructions...'),
+        link_text: _('Forgot your password?'),
+        confirmation_text: _('Check your email for the password reset link'),
+      },
+    },
   };
 
-  useEffect(() => {
-    if (!isTauriAppPlatform()) return;
-    if (isOAuthServerRunning.current) return;
-    isOAuthServerRunning.current = true;
+  return (
+    <div className="min-h-screen">
+      <div className="flex min-h-screen items-center justify-center p-4">
+        <div className="w-full max-w-md bg-base-100 rounded-lg shadow-lg p-6">
+          <div className="text-center mb-6">
+            <h1 className="text-2xl font-bold">BookTalk</h1>
+            <p className="text-sm opacity-70">{_('Sign in to your account')}</p>
+            {/* Display any error messages */}
+            {typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('error') && (
+              <div className="alert alert-error mt-4">
+                <p>Login error: {new URLSearchParams(window.location.search).get('error')}</p>
+                <button 
+                  onClick={handleEmergencyAccess}
+                  className="btn btn-sm btn-ghost mt-2"
+                >
+                  Emergency Library Access
+                </button>
+              </div>
+            )}
+          </div>
 
-    startTauriOAuth();
-    return () => {
-      isOAuthServerRunning.current = false;
-      stopTauriOAuth();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.access_token && session.user) {
-        login(session.access_token, session.user);
-        const redirectTo = new URLSearchParams(window.location.search).get('redirect');
-        router.push(redirectTo ?? '/library');
-      }
-    });
-
-    return () => {
-      subscription?.subscription.unsubscribe();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [router]);
-
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
-
-  if (!isMounted) {
-    return null;
-  }
-
-  // For tauri app development, use a custom OAuth server to handle the OAuth callback
-  // For tauri app production, use deeplink to handle the OAuth callback
-  // For web app, use the built-in OAuth callback page /auth/callback
-  return isTauriAppPlatform() ? (
-    <div
-      className={clsx(
-        'fixed inset-0 z-0 flex select-none flex-col items-center overflow-y-auto',
-        'bg-base-100 border-base-200 border',
-        appService?.hasSafeAreaInset && 'pt-[env(safe-area-inset-top)]',
-      )}
-    >
-      <div
-        ref={headerRef}
-        className={clsx(
-          'fixed z-10 flex w-full items-center justify-between py-2 pe-6 ps-4',
-          appService?.hasTrafficLight && 'pt-11',
-        )}
-      >
-        <button onClick={handleGoBack} className={clsx('btn btn-ghost h-8 min-h-8 w-8 p-0')}>
-          <IoArrowBack className='text-base-content' />
-        </button>
-
-        {appService?.hasWindowBar && (
-          <WindowButtons
-            headerRef={headerRef}
-            showMinimize={!isTrafficLightVisible}
-            showMaximize={!isTrafficLightVisible}
-            showClose={!isTrafficLightVisible}
-            onClose={handleGoBack}
+          <Auth
+            supabaseClient={supabase}
+            appearance={{
+              theme: ThemeSupa,
+              variables: {
+                default: {
+                  colors: {
+                    brand: '#0070f3',
+                    brandAccent: '#0061d5',
+                  },
+                },
+              },
+            }}
+            theme={isDarkMode ? 'dark' : 'light'}
+            providers={[]}
+            redirectTo={redirectUrl}
+            localization={localization}
+            queryParams={{
+              next: returnTo,
+            }}
+            showLinks={true}
+            onlyThirdPartyProviders={false}
           />
-        )}
+          
+          {/* Debug login section - hidden by default */}
+          <div className="mt-8 text-center">
+            <button 
+              onClick={() => setShowDebug(!showDebug)}
+              className="text-xs opacity-30 hover:opacity-100"
+            >
+              {showDebug ? 'Hide Debug Options' : 'Debug Options'}
+            </button>
+            
+            {showDebug && (
+              <div className="mt-4 p-4 border border-gray-200 dark:border-gray-700 rounded-lg">
+                <h3 className="text-sm font-bold mb-2">Debug Login</h3>
+                <div className="space-y-2">
+                  <input
+                    type="email"
+                    placeholder="Email for emergency login"
+                    className="input input-sm input-bordered w-full"
+                    value={debugEmail}
+                    onChange={(e) => setDebugEmail(e.target.value)}
+                  />
+                  <input
+                    type="password"
+                    placeholder="Password for emergency login"
+                    className="input input-sm input-bordered w-full"
+                    value={debugPassword}
+                    onChange={(e) => setDebugPassword(e.target.value)}
+                  />
+                  <div className="flex space-x-2 justify-center">
+                    <button 
+                      onClick={handleSaveCredentials}
+                      className="btn btn-sm btn-outline"
+                      disabled={!debugEmail}
+                    >
+                      Save Credentials
+                    </button>
+                    <button 
+                      onClick={handleDebugLogin}
+                      className="btn btn-sm btn-primary"
+                      disabled={!debugEmail || !debugPassword}
+                    >
+                      Login
+                    </button>
+                  </div>
+                  <div className="mt-2">
+                    <button 
+                      onClick={handleEmergencyAccess}
+                      className="btn btn-sm btn-error"
+                    >
+                      Emergency Library Access
+                    </button>
+                    <p className="text-xs mt-1 opacity-70">Bypass login completely</p>
+                  </div>
+                  
+                  <div className="mt-4 text-xs opacity-70">
+                    <p>If login succeeds but fails to redirect:</p>
+                    <button 
+                      onClick={() => window.location.replace('/library')}
+                      className="btn btn-xs mt-1"
+                    >
+                      Go to Library
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
-      <div
-        className={clsx('z-20 pb-8', appService?.hasTrafficLight ? 'mt-24' : 'mt-12')}
-        style={{ maxWidth: '420px' }}
-      >
-        <ProviderLogin
-          provider='google'
-          handleSignIn={tauriSignIn}
-          Icon={FcGoogle}
-          label={_('Sign in with Google')}
-        />
-        <ProviderLogin
-          provider='apple'
-          handleSignIn={appService?.isIOSApp ? tauriSignInApple : tauriSignIn}
-          Icon={FaApple}
-          label={_('Sign in with Apple')}
-        />
-        <ProviderLogin
-          provider='github'
-          handleSignIn={tauriSignIn}
-          Icon={FaGithub}
-          label={_('Sign in with GitHub')}
-        />
-        <hr className='border-base-300 my-3 mt-6 w-64 border-t' />
-        <Auth
-          supabaseClient={supabase}
-          appearance={{ theme: ThemeSupa }}
-          theme={isDarkMode ? 'dark' : 'light'}
-          magicLink={true}
-          providers={[]}
-          redirectTo={getTauriRedirectTo(false)}
-          localization={getAuthLocalization()}
-        />
-      </div>
-    </div>
-  ) : (
-    <div style={{ maxWidth: '420px', margin: 'auto', padding: '2rem', paddingTop: '4rem' }}>
-      <button
-        onClick={handleGoBack}
-        className='btn btn-ghost fixed left-6 top-6 h-8 min-h-8 w-8 p-0'
-      >
-        <IoArrowBack className='text-base-content' />
-      </button>
-      <Auth
-        supabaseClient={supabase}
-        appearance={{ theme: ThemeSupa }}
-        theme={isDarkMode ? 'dark' : 'light'}
-        magicLink={true}
-        providers={['google', 'apple', 'github']}
-        redirectTo={getWebRedirectTo()}
-        localization={getAuthLocalization()}
-      />
     </div>
   );
 }

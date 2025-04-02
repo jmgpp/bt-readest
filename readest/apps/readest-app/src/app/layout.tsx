@@ -1,8 +1,7 @@
 import * as React from 'react';
-import Providers from '@/components/Providers';
-
 import '../styles/globals.css';
 import '../styles/fonts.css';
+import ClientLayout from '../components/ClientLayout';
 
 const url = 'https://booktalk-app.com/';
 const title = 'BookTalk — Connect with readers, discuss books, and share progress';
@@ -42,7 +41,7 @@ export const viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html>
+    <html lang="en">
       <head>
         <title>{title}</title>
         <meta
@@ -70,7 +69,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name='twitter:image' content={previewImage} />
       </head>
       <body>
-        <Providers>{children}</Providers>
+        <ClientLayout>{children}</ClientLayout>
       </body>
     </html>
   );
