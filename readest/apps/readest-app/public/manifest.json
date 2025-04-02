@@ -1,0 +1,26 @@
+{
+  "name": "BookTalk",
+  "short_name": "BookTalk",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "description": "Discover BookTalk, the social book reading platform where readers connect. Share your reading progress, join book clubs, discuss with friends, and enjoy powerful tools for highlighting, bookmarking, and commenting.",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "256x256"
+    },
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "splash_pages": null
+}
